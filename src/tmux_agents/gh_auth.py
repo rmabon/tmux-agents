@@ -117,6 +117,7 @@ class SyncResult:
         "disabled_no_host_gh",
         "disabled_not_logged_in",
         "disabled_no_container_gh",
+        "already_authenticated",
         "synced",
         "failed",
     ]
@@ -133,6 +134,8 @@ class SyncResult:
             stage.warn("gh not logged in on host (auth sharing disabled)")
         elif self.outcome == "disabled_no_container_gh":
             stage.warn(f"gh missing in {self.where} (auth sharing disabled)")
+        elif self.outcome == "already_authenticated":
+            stage.info("already authenticated (runtime-injected GH_TOKEN)")
         elif self.outcome == "synced":
             stage.info("token synced")
         elif self.outcome == "failed":
@@ -169,6 +172,20 @@ def has_gh_in_sandbox(name: str) -> bool:
     return True
 
 
+def sandbox_has_env_token(name: str) -> bool:
+    """True when the sandbox runtime injected a GitHub token as GH_TOKEN
+    into the VM environment (observed with sbx 0.39, present in PID 1's
+    env — a distinct token lineage from the host's `gh auth token`). gh
+    always prefers GH_TOKEN over stored credentials, and `gh auth login`
+    refuses to run while it is set, so a sync would be both impossible
+    and pointless."""
+    try:
+        sandbox.exec_capture(name, 'test -n "$GH_TOKEN"', timeout=_SBX_PROBE_TIMEOUT)
+    except sandbox.SandboxError:
+        return False
+    return True
+
+
 def _login_sandbox(name: str, token: str) -> bool:
     """Run `gh auth login --with-token` in the sandbox, token on stdin."""
     try:
@@ -186,10 +203,22 @@ def _login_sandbox(name: str, token: str) -> bool:
 
 def maybe_sync_gh_auth_sandbox(sandbox_name: str) -> SyncResult:
     """Idempotent gh-token sync for a sandbox — `maybe_sync_gh_auth` with
-    sbx exec as the transport. Every failure path is non-fatal: the agent
-    still spawns and gh asks for a manual login exactly as before."""
+    sbx exec as the transport. Sandbox probes run before host probes: when
+    the runtime already injected GH_TOKEN, the sync is a no-op regardless
+    of the host's gh state, and the sync only exists as a fallback for
+    setups without that injection. Every failure path is non-fatal: the
+    agent still spawns and gh asks for a manual login exactly as before."""
     if not sandbox_name:
         return SyncResult("disabled_no_container_gh", where="sandbox")
+    if not has_gh_in_sandbox(sandbox_name):
+        logger.warning("gh not found in %s; gh auth sharing disabled", sandbox_name)
+        return SyncResult("disabled_no_container_gh", where="sandbox")
+    if sandbox_has_env_token(sandbox_name):
+        logger.info(
+            "sandbox %s already authenticated via runtime-injected GH_TOKEN",
+            sandbox_name,
+        )
+        return SyncResult("already_authenticated", where="sandbox")
     if not host_gh_installed():
         logger.warning("gh not installed on host; gh auth sharing disabled")
         return SyncResult("disabled_no_host_gh", where="sandbox")
@@ -197,9 +226,6 @@ def maybe_sync_gh_auth_sandbox(sandbox_name: str) -> SyncResult:
     if token is None:
         logger.warning("gh not logged in on host; gh auth sharing disabled")
         return SyncResult("disabled_not_logged_in", where="sandbox")
-    if not has_gh_in_sandbox(sandbox_name):
-        logger.warning("gh not found in %s; gh auth sharing disabled", sandbox_name)
-        return SyncResult("disabled_no_container_gh", where="sandbox")
     if not _login_sandbox(sandbox_name, token):
         return SyncResult("failed", where="sandbox")
     logger.info("gh auth token synced into sandbox %s", sandbox_name)

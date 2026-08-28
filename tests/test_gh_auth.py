@@ -303,11 +303,14 @@ def test_login_sandbox_false_on_timeout(monkeypatch):
 
 # ---------------------------------------------------------------------------
 # maybe_sync_gh_auth_sandbox — outcome mapping (all results carry
-# where="sandbox" so render names the right target)
+# where="sandbox" so render names the right target). Sandbox probes run
+# before host probes: an injected GH_TOKEN short-circuits everything.
 # ---------------------------------------------------------------------------
 
 
 def test_sandbox_sync_disabled_when_no_host_gh(monkeypatch):
+    monkeypatch.setattr(gh_auth, "has_gh_in_sandbox", lambda n: True)
+    monkeypatch.setattr(gh_auth, "sandbox_has_env_token", lambda n: False)
     monkeypatch.setattr(gh_auth, "host_gh_installed", lambda: False)
     assert maybe_sync_gh_auth_sandbox("aipe-sbx") == SyncResult(
         "disabled_no_host_gh", where="sandbox"
@@ -315,6 +318,8 @@ def test_sandbox_sync_disabled_when_no_host_gh(monkeypatch):
 
 
 def test_sandbox_sync_disabled_when_not_logged_in(monkeypatch):
+    monkeypatch.setattr(gh_auth, "has_gh_in_sandbox", lambda n: True)
+    monkeypatch.setattr(gh_auth, "sandbox_has_env_token", lambda n: False)
     monkeypatch.setattr(gh_auth, "host_gh_installed", lambda: True)
     monkeypatch.setattr(gh_auth, "host_gh_token", lambda: None)
     assert maybe_sync_gh_auth_sandbox("aipe-sbx") == SyncResult(
@@ -323,8 +328,6 @@ def test_sandbox_sync_disabled_when_not_logged_in(monkeypatch):
 
 
 def test_sandbox_sync_disabled_when_no_sandbox_gh(monkeypatch):
-    monkeypatch.setattr(gh_auth, "host_gh_installed", lambda: True)
-    monkeypatch.setattr(gh_auth, "host_gh_token", lambda: "gho_x")
     monkeypatch.setattr(gh_auth, "has_gh_in_sandbox", lambda n: False)
     assert maybe_sync_gh_auth_sandbox("aipe-sbx") == SyncResult(
         "disabled_no_container_gh", where="sandbox"
@@ -337,11 +340,27 @@ def test_sandbox_sync_disabled_on_empty_name():
     )
 
 
+def test_sandbox_sync_skips_when_runtime_injected_token(monkeypatch):
+    """Injected GH_TOKEN wins before any host probe: `gh auth login`
+    refuses while it is set, and gh prefers it over stored creds anyway."""
+    monkeypatch.setattr(gh_auth, "has_gh_in_sandbox", lambda n: True)
+    monkeypatch.setattr(gh_auth, "sandbox_has_env_token", lambda n: True)
+
+    def boom():  # host probes must not run at all
+        raise AssertionError("host probe reached despite injected token")
+
+    monkeypatch.setattr(gh_auth, "host_gh_installed", boom)
+    assert maybe_sync_gh_auth_sandbox("aipe-sbx") == SyncResult(
+        "already_authenticated", where="sandbox"
+    )
+
+
 def test_sandbox_sync_synced(monkeypatch):
     logins = []
+    monkeypatch.setattr(gh_auth, "has_gh_in_sandbox", lambda n: True)
+    monkeypatch.setattr(gh_auth, "sandbox_has_env_token", lambda n: False)
     monkeypatch.setattr(gh_auth, "host_gh_installed", lambda: True)
     monkeypatch.setattr(gh_auth, "host_gh_token", lambda: "gho_x")
-    monkeypatch.setattr(gh_auth, "has_gh_in_sandbox", lambda n: True)
     monkeypatch.setattr(
         gh_auth, "_login_sandbox", lambda n, t: logins.append((n, t)) or True
     )
@@ -352,10 +371,29 @@ def test_sandbox_sync_synced(monkeypatch):
 
 
 def test_sandbox_sync_failed_when_login_fails(monkeypatch):
+    monkeypatch.setattr(gh_auth, "has_gh_in_sandbox", lambda n: True)
+    monkeypatch.setattr(gh_auth, "sandbox_has_env_token", lambda n: False)
     monkeypatch.setattr(gh_auth, "host_gh_installed", lambda: True)
     monkeypatch.setattr(gh_auth, "host_gh_token", lambda: "gho_x")
-    monkeypatch.setattr(gh_auth, "has_gh_in_sandbox", lambda n: True)
     monkeypatch.setattr(gh_auth, "_login_sandbox", lambda n, t: False)
     assert maybe_sync_gh_auth_sandbox("aipe-sbx") == SyncResult(
         "failed", where="sandbox"
     )
+
+
+def test_sandbox_env_token_probe_argv(monkeypatch):
+    calls = []
+
+    def fake_run(cmd, **kw):
+        calls.append(cmd)
+        return MagicMock(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    assert gh_auth.sandbox_has_env_token("aipe-sbx") is True
+    assert calls == [["sbx", "exec", "aipe-sbx", "sh", "-c", 'test -n "$GH_TOKEN"']]
+
+
+def test_render_already_authenticated_calls_info():
+    st = MagicMock()
+    SyncResult("already_authenticated", where="sandbox").render(st)
+    st.info.assert_called_once_with("already authenticated (runtime-injected GH_TOKEN)")

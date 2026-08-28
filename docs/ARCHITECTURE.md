@@ -371,10 +371,13 @@ to the spawn log (`paths.spawn_log(window_id)`); the placeholder pane's
    gh token (`gh auth token`, keyring-backed) and pipes it via stdin into
    `gh auth login --with-token` in the target. Non-fatal: any missing
    prerequisite (gh on host, host login, gh in the target) or sync failure
-   emits a stage warning and the agent starts without it. The same stage
-   runs in `agent-restore` and `agent-rebuild`, so a rebuilt container or
-   recreated sandbox (which loses its `~/.config/gh/hosts.yml`) is
-   re-authed automatically.
+   emits a stage warning and the agent starts without it. Sandboxes where
+   the sbx runtime already injected a GitHub token as `GH_TOKEN` (observed
+   with sbx 0.39) short-circuit to "already authenticated" — gh prefers
+   the env token over stored credentials and `gh auth login` refuses
+   while it is set. The same stage runs in `agent-restore` and
+   `agent-rebuild`, so a rebuilt container or recreated sandbox (which
+   loses its `~/.config/gh/hosts.yml`) is re-authed automatically.
 4. **Worktree.** `worktree.resolve` returns `<repo>` if no branch, else
    `<repo>/.worktrees/<branch>`. If the worktree dir doesn't exist,
    `git worktree add -B <branch> <target> <commit-ish>` is run. The
